@@ -117,6 +117,8 @@ via `artifactstore audit`.
 
 ### Visual demo backend + iOS visualizer
 
+<img src="docs/images/demoView.png" alt="ArtifactStore Visualizer demo" width="720">
+
 The visualizer is an optional presentation layer on top of the same demo
 runner. A FastAPI backend runs the existing demo on the Mac, emits safe JSON
 events, and the SwiftUI app visualizes the run on iPad/iPhone. The app does

@@ -95,6 +95,7 @@ def _new_run_id() -> str:
 
 
 class RunRequest(BaseModel):
+    """SwiftUI-provided run configuration for one visual demo invocation."""
     kind: str = Field(default="pytest")
     target: str = Field(default="auth_expiry")
     model: str = Field(default=DEFAULT_MODEL)
@@ -102,6 +103,7 @@ class RunRequest(BaseModel):
 
 @dataclass
 class RunState:
+    """In-memory state for one run: summary counters plus visual events."""
     run_id: str
     kind: str
     target: str
@@ -120,6 +122,7 @@ class RunState:
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def add_event(self, event: dict[str, Any]) -> dict[str, Any]:
+        """Append one sanitized, monotonically sequenced visual event."""
         kind = str(event.get("kind") or "agent_text")
         if kind not in EVENT_KINDS:
             kind = "agent_text"
@@ -191,6 +194,7 @@ app = FastAPI(title="ArtifactStore Visualizer API")
 
 
 def write_trace(state: RunState, trace_dir: Path | None = None) -> Path:
+    """Persist a completed run's summary/events for Replay Latest."""
     target_dir = trace_dir or TRACE_DIR
     target_dir.mkdir(parents=True, exist_ok=True)
     path = target_dir / f"{state.run_id}.json"
@@ -205,6 +209,7 @@ def run_visual_demo(
     sub_client: Any | None = None,
     trace_dir: Path | None = None,
 ) -> None:
+    """Run the existing supervisor/subagent demo in a background thread."""
     active_trace_dir = trace_dir or TRACE_DIR
     try:
         load_dotenv(override=True)
@@ -284,6 +289,7 @@ def run_visual_demo(
 
 
 def start_run(request: RunRequest) -> RunState:
+    """Create RunState and launch the background visual demo worker."""
     from demo.providers import ProviderError, resolve_model_shorthand
     try:
         model = resolve_model_shorthand(request.model)
@@ -318,11 +324,13 @@ def _get_run(run_id: str) -> RunState:
 
 @app.get("/health")
 def health() -> dict[str, str]:
+    """Lightweight connectivity check for the SwiftUI app."""
     return {"status": "ok"}
 
 
 @app.post("/runs", status_code=202)
 def create_run(request: RunRequest) -> dict[str, str]:
+    """Start a demo run and return immediately with its run id."""
     try:
         state = start_run(request)
     except ValueError as exc:
@@ -332,16 +340,19 @@ def create_run(request: RunRequest) -> dict[str, str]:
 
 @app.get("/runs/{run_id}")
 def get_run(run_id: str) -> dict[str, Any]:
+    """Return the latest summary counters and final text for a run."""
     return _get_run(run_id).summary()
 
 
 @app.get("/runs/{run_id}/events")
 def get_events(run_id: str, after: int = Query(default=0, ge=0)) -> dict[str, Any]:
+    """Return visual events whose seq is greater than `after`."""
     return {"events": _get_run(run_id).events_after(after)}
 
 
 @app.get("/traces/latest")
 def latest_trace() -> dict[str, Any]:
+    """Load the newest saved JSON trace for offline replay."""
     if not TRACE_DIR.exists():
         raise HTTPException(status_code=404, detail="no traces found")
     traces = sorted(

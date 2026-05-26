@@ -115,6 +115,40 @@ formal citations, all citations verified, ~3 unauthorized `view='raw'`
 attempts blocked under the narrow grant. The full audit log is queryable
 via `artifactstore audit`.
 
+### Visual demo backend + iOS visualizer
+
+The visualizer is an optional presentation layer on top of the same demo
+runner. A FastAPI backend runs the existing demo on the Mac, emits safe JSON
+events, and the SwiftUI app visualizes the run on iPad/iPhone. The app does
+not run LLM calls, read SQLite directly, or store provider credentials.
+
+```bash
+# Start the Mac-side visual backend.
+uv sync
+uv run python -m uvicorn demo.visual_server:app --host 0.0.0.0 --port 8765
+
+# In another shell, verify the backend is reachable.
+curl http://127.0.0.1:8765/health
+```
+
+On iPad/iPhone, connect to:
+
+```text
+http://<Mac LAN or Tailscale IP>:8765
+```
+
+API keys stay in the Mac-side `.env`; the iOS app only sends scenario/model
+choices and receives sanitized run events. Live runs use in-memory `RunState`
+for polling. Completed runs write:
+
+```text
+visual_traces/<run_id>.json     # replayable visual event trace
+visual_traces/<run_id>.sqlite   # ArtifactStore DB for future DB viewer work
+```
+
+`Replay Latest` reads the latest JSON trace. The SQLite file is not read by
+the current SwiftUI app.
+
 ### Evaluation
 
 ```bash
@@ -143,19 +177,29 @@ uv run python eval/_aggregate_for_report.py \
 
 ## Provider configuration
 
-The agent loop uses the `anthropic` Python SDK as its HTTP client. The same
-SDK speaks DeepSeek's Anthropic-compatible endpoint when `ANTHROPIC_BASE_URL`
-points at it. **`.env` is gitignored**; copy `.env.example` and fill it in.
+The agent loop uses the `anthropic` Python SDK as its HTTP client against
+Anthropic-Messages-API-compatible endpoints. The model-name prefix selects
+the provider-specific credentials and base URL. **`.env` is gitignored**;
+copy `.env.example` and fill in whichever keys you have.
 
 ```bash
-# DeepSeek V4 Pro (default, recommended) — get key at platform.deepseek.com
-ANTHROPIC_API_KEY=sk-...
-ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic
+# DeepSeek V4 (default, recommended) — get key at platform.deepseek.com
+DEEPSEEK_API_KEY=sk-...
+DEEPSEEK_BASE_URL=https://api.deepseek.com/anthropic
+DEEPSEEK_MODEL=deepseek-v4-pro
 
-# OR native Anthropic — get key at console.anthropic.com
-ANTHROPIC_API_KEY=sk-ant-api03-...
-# (omit ANTHROPIC_BASE_URL — SDK uses Anthropic's default)
+# Qwen via Alibaba Cloud Model Studio
+QWEN_API_KEY=sk-...
+QWEN_BASE_URL=https://dashscope-intl.aliyuncs.com/apps/anthropic
+QWEN_MODEL=qwen3.6-plus
 ```
+
+Provider routing is prefix-based:
+
+| model prefix | provider | key env | URL env |
+|---|---|---|---|
+| `deepseek-*` | DeepSeek | `DEEPSEEK_API_KEY` | `DEEPSEEK_BASE_URL` |
+| `qwen*` | Alibaba Model Studio | `QWEN_API_KEY` | `QWEN_BASE_URL` |
 
 Three pre-flight flags catch every category of provider misconfiguration we've
 seen in practice before spending eval budget:
@@ -303,7 +347,7 @@ Sonnet 4.5 if you prefer).
 uv sync
 
 # 2. Provider key
-cp .env.example .env && $EDITOR .env   # fill in ANTHROPIC_API_KEY
+cp .env.example .env && $EDITOR .env   # fill in DEEPSEEK_API_KEY or QWEN_API_KEY
 uv run python -m demo.runner --check-config        # 0 cost, no network
 uv run python -m demo.runner --verify-tool-use     # ~$0.0001
 
@@ -458,8 +502,8 @@ CLAUDE.md             ← agent-instruction file with locked design choices
 - **Python 3.12** pinned via `.python-version`, managed with [`uv`](https://github.com/astral-sh/uv)
 - **SQLite (stdlib) + FTS5** for storage; chosen over DuckDB because FTS5 is
   built-in and the prototype scale doesn't need columnar
-- **Anthropic Messages API shape** as the agent transport — provider-agnostic
-  via `ANTHROPIC_BASE_URL`
+- **Anthropic Messages API shape** as the agent transport — provider-specific
+  keys and endpoint URLs are resolved from the model prefix
 - **Typer** for the CLI
 - **pytest** for tests; **Typst** for the architecture report
 - Optional: `tiktoken` for accurate token counting (falls back to `len/4`)

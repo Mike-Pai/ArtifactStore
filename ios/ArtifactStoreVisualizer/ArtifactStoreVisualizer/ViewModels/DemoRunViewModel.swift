@@ -29,7 +29,9 @@ final class DemoRunViewModel: ObservableObject {
     @Published var isSettingsPresented = false
     @Published private(set) var connectionState: ConnectionState = .idle
     @Published private(set) var runSummary: RunSummary?
+    // Raw backend events are complete and immediate; Raw Events reads this.
     @Published private(set) var events: [RunEvent] = []
+    // Presented events advance through the pacing queue for the main flow UI.
     @Published private(set) var presentedEvents: [RunEvent] = []
     @Published var selectedEvent: RunEvent?
     @Published var selectedMessage: FlowMessage?

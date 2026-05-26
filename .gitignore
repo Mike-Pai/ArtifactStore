@@ -23,6 +23,8 @@ dist/
 .DS_Store
 .idea/
 .vscode/
+*.xcuserstate
+xcuserdata/
 
 # Eval result dirs: the report's tables are computed from committed
 # result.jsonl / manifest.json / config.json / audit.csv inside each run dir.
@@ -30,6 +32,7 @@ dist/
 # (they are large and re-derivable by replaying fixtures through the driver).
 eval/runs/*/__pycache__/
 artifactstore_data/
+visual_traces/
 
 # Claude Code local-only settings
 .claude/settings.local.json

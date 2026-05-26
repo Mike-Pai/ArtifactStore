@@ -6,13 +6,96 @@ Every call goes through ArtifactStore.* which logs to artifact_access_log.
 """
 from __future__ import annotations
 
+from dataclasses import asdict
+from typing import Any, Callable
+
 from artifactstore import ArtifactStore
-from demo.agent import Tool
+from artifactstore.grants import AccessDenied
+from artifactstore.tokens import estimate
+from demo.agent import EventSink, Tool
+from demo.workloads import ViewPolicy, WorkloadResult, run_workload
+
+
+def _emit(event_sink: EventSink | None, *, actor: str, kind: str, title: str,
+          summary: str, payload: dict[str, Any] | None = None) -> None:
+    if event_sink is None:
+        return
+    try:
+        event_sink({
+            "actor": actor,
+            "kind": kind,
+            "title": title,
+            "summary": summary,
+            "payload": payload or {},
+        })
+    except Exception:
+        return
+
+
+def _read_payload(tool_name: str, grant_id: str, kw: dict[str, Any],
+                  result: Any = None, *, allowed: bool,
+                  exc: Exception | None = None) -> dict[str, Any]:
+    op = tool_name.removeprefix("artifact_")
+    payload: dict[str, Any] = {
+        "tool_name": tool_name,
+        "grant_id": grant_id,
+        "operation": op,
+        "allowed": allowed,
+    }
+    for key in ("artifact_id", "view"):
+        if key in kw:
+            payload[key] = kw[key]
+    if isinstance(result, list):
+        payload["result_count"] = len(result)
+    elif isinstance(result, str):
+        payload["result_chars"] = len(result)
+        payload["result_tokens"] = estimate(result)
+    elif isinstance(result, dict):
+        payload["result_keys"] = sorted(
+            k for k in result.keys()
+            if k.lower() not in {"raw", "raw_blob", "raw_text", "body", "api_key"}
+        )
+    if exc is not None:
+        payload["error_type"] = type(exc).__name__
+        if isinstance(exc, AccessDenied):
+            payload["denial_reason"] = str(exc)[:240]
+    return payload
+
+
+def _emit_read(event_sink: EventSink | None, *, actor: str, tool_name: str,
+               grant_id: str, kw: dict[str, Any], result: Any = None,
+               allowed: bool, exc: Exception | None = None) -> None:
+    status = "allowed" if allowed else "denied"
+    _emit(
+        event_sink,
+        actor=actor,
+        kind="audit_recorded",
+        title=tool_name,
+        summary=f"{actor} {status} {tool_name}",
+        payload=_read_payload(tool_name, grant_id, kw, result,
+                              allowed=allowed, exc=exc),
+    )
 
 
 # --------- Subagent tools (gated by a single grant) ---------
 
-def subagent_tools(store: ArtifactStore, grant_id: str) -> list[Tool]:
+def subagent_tools(
+    store: ArtifactStore,
+    grant_id: str,
+    *,
+    event_sink: EventSink | None = None,
+) -> list[Tool]:
+    def _call_read(tool_name: str, fn: Callable[..., Any], **kw: Any) -> Any:
+        try:
+            result = fn(**kw)
+        except AccessDenied as exc:
+            _emit_read(event_sink, actor="subagent", tool_name=tool_name,
+                       grant_id=grant_id, kw=kw, allowed=False, exc=exc)
+            raise
+        _emit_read(event_sink, actor="subagent", tool_name=tool_name,
+                   grant_id=grant_id, kw=kw, result=result, allowed=True)
+        return result
+
     return [
         Tool(
             name="artifact_search",
@@ -29,7 +112,11 @@ def subagent_tools(store: ArtifactStore, grant_id: str) -> list[Tool]:
                 },
                 "required": ["query"],
             },
-            fn=lambda **kw: store.search(grant_id=grant_id, **kw),
+            fn=lambda **kw: _call_read(
+                "artifact_search",
+                lambda **inner: store.search(grant_id=grant_id, **inner),
+                **kw,
+            ),
         ),
         Tool(
             name="artifact_get_spans",
@@ -44,7 +131,11 @@ def subagent_tools(store: ArtifactStore, grant_id: str) -> list[Tool]:
                 },
                 "required": ["artifact_id"],
             },
-            fn=lambda **kw: store.get_spans(grant_id=grant_id, **kw),
+            fn=lambda **kw: _call_read(
+                "artifact_get_spans",
+                lambda **inner: store.get_spans(grant_id=grant_id, **inner),
+                **kw,
+            ),
         ),
         Tool(
             name="artifact_expand_view",
@@ -61,7 +152,11 @@ def subagent_tools(store: ArtifactStore, grant_id: str) -> list[Tool]:
                 },
                 "required": ["artifact_id", "view"],
             },
-            fn=lambda **kw: store.expand_view(grant_id=grant_id, **kw),
+            fn=lambda **kw: _call_read(
+                "artifact_expand_view",
+                lambda **inner: store.expand_view(grant_id=grant_id, **inner),
+                **kw,
+            ),
         ),
         Tool(
             name="artifact_find_related",
@@ -75,7 +170,11 @@ def subagent_tools(store: ArtifactStore, grant_id: str) -> list[Tool]:
                 },
                 "required": ["artifact_id"],
             },
-            fn=lambda **kw: store.find_related(grant_id=grant_id, **kw),
+            fn=lambda **kw: _call_read(
+                "artifact_find_related",
+                lambda **inner: store.find_related(grant_id=grant_id, **inner),
+                **kw,
+            ),
         ),
         Tool(
             name="submit_report",
@@ -97,11 +196,6 @@ def subagent_tools(store: ArtifactStore, grant_id: str) -> list[Tool]:
 
 # --------- Supervisor tools (run workloads + delegate) ---------
 
-from dataclasses import asdict
-from typing import Callable
-
-from demo.workloads import ViewPolicy, WorkloadResult, run_workload
-
 
 def supervisor_tools(
     store: ArtifactStore,
@@ -110,6 +204,7 @@ def supervisor_tools(
     issuer_agent_id: str,
     run_subagent: Callable[[str, str], dict],
     policy: ViewPolicy = ViewPolicy.ARTIFACT,
+    event_sink: EventSink | None = None,
 ) -> list[Tool]:
     """Supervisor tool surface.
 
@@ -129,6 +224,21 @@ def supervisor_tools(
         # Under ARTIFACT policy the supervisor sees ONLY the handle, never raw.
         # Under RAW/TRUNCATED/SUMMARY it sees the body — that's the eval baseline.
         d = asdict(result); d["policy"] = result.policy.value
+        if result.artifact_id:
+            _emit(
+                event_sink,
+                actor="artifactstore",
+                kind="artifact_created",
+                title=result.artifact_type,
+                summary=f"Artifact {result.artifact_id} created",
+                payload={
+                    "tool_name": "run_workload",
+                    "artifact_id": result.artifact_id,
+                    "artifact_type": result.artifact_type,
+                    "raw_token_count": result.raw_token_count,
+                    "policy": result.policy.value,
+                },
+            )
         return d
 
     def _create_grant(subject_agent_id: str, artifact_types: list[str],
@@ -150,19 +260,64 @@ def supervisor_tools(
             max_tokens=max_tokens,
             ttl_seconds=ttl_seconds,
         )
-        return {"grant_id": grant_id, "predicate": predicate,
-                "allowed_views": allowed_views, "allowed_ops": allowed_ops}
+        payload = {"grant_id": grant_id, "predicate": predicate,
+                   "allowed_views": allowed_views, "allowed_ops": allowed_ops,
+                   "max_tokens": max_tokens,
+                   "subject_agent_id": subject_agent_id}
+        _emit(
+            event_sink,
+            actor="artifactstore",
+            kind="grant_created",
+            title=grant_id,
+            summary=f"Grant {grant_id} created for {subject_agent_id}",
+            payload=payload,
+        )
+        return payload
 
     def _delegate(task: str, grant_id: str) -> dict:
-        return run_subagent(task, grant_id)
+        _emit(
+            event_sink,
+            actor="supervisor",
+            kind="delegate_started",
+            title=grant_id,
+            summary=f"Supervisor delegated work under {grant_id}",
+            payload={"grant_id": grant_id, "task_chars": len(task)},
+        )
+        result = run_subagent(task, grant_id)
+        audit = result.get("audit") or []
+        if isinstance(audit, list):
+            allowed = sum(1 for row in audit if row.get("allowed") in (1, True))
+            denied = sum(1 for row in audit if row.get("allowed") in (0, False))
+            _emit(
+                event_sink,
+                actor="artifactstore",
+                kind="audit_recorded",
+                title=grant_id,
+                summary=f"Audit recorded {len(audit)} reads for {grant_id}",
+                payload={
+                    "grant_id": grant_id,
+                    "audit_count": len(audit),
+                    "allowed_count": allowed,
+                    "denied_count": denied,
+                },
+            )
+        return result
 
     def _expand_artifact(artifact_id: str, view: str,
                          token_budget: int = 1500) -> str:
         # Supervisor uses its own implicit grant — eval treats supervisor as
         # trusted for citation verification. (PLAN §20.2: "supervisor verifies
         # every citation".)
-        return store.expand_view(artifact_id=artifact_id, grant_id="__supervisor__",
-                                 view=view, token_budget=token_budget)
+        kw = {"artifact_id": artifact_id, "view": view,
+              "token_budget": token_budget}
+        result = store.expand_view(artifact_id=artifact_id,
+                                   grant_id="__supervisor__",
+                                   view=view,
+                                   token_budget=token_budget)
+        _emit_read(event_sink, actor="supervisor", tool_name="expand_artifact",
+                   grant_id="__supervisor__", kw=kw, result=result,
+                   allowed=True)
+        return result
 
     def _verify_citation(citation: str) -> dict:
         """Resolve a 'art_xxx/span_yyy' citation. The supervisor should call
@@ -173,16 +328,29 @@ def supervisor_tools(
         try:
             art_id, span_id = parse(citation)
         except BadCitation as e:
-            return {"citation": citation, "resolved": False,
-                    "error": f"malformed: {e}"}
+            result = {"citation": citation, "resolved": False,
+                      "error": f"malformed: {e}"}
+            _emit(event_sink, actor="supervisor", kind="citation_verified",
+                  title=citation, summary=f"Citation {citation} malformed",
+                  payload=result)
+            return result
         ok = verify_resolves(store.conn, citation)
-        return {
+        result = {
             "citation": citation,
             "resolved": ok,
             "artifact_id": art_id,
             "span_id": span_id,
             "error": None if ok else "span not found in store",
         }
+        _emit(
+            event_sink,
+            actor="supervisor",
+            kind="citation_verified",
+            title=citation,
+            summary=f"Citation {citation} {'resolved' if ok else 'failed'}",
+            payload=result,
+        )
+        return result
 
     return [
         Tool(

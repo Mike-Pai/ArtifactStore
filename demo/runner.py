@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from artifactstore import ArtifactStore
-from demo.agent import Agent, ModelConfig
+from demo.agent import Agent, EventSink, ModelConfig
 from demo.prompts import SUBAGENT_SYSTEM, SUPERVISOR_SYSTEM
 from demo.tools import subagent_tools, supervisor_tools
 from demo.workloads import ViewPolicy
@@ -74,7 +74,8 @@ def _extract_submit_report(messages: list[dict]) -> dict | None:
 
 
 def _make_run_subagent(store: ArtifactStore, model: str, verbose: bool,
-                       client: Any | None = None):
+                       client: Any | None = None,
+                       event_sink: EventSink | None = None):
     """Returns a `run_subagent(task, grant_id) -> dict` callable used as the
     supervisor's `delegate` adapter. `client` lets tests inject a stub Anthropic
     client; production passes None and the Agent constructs a real one.
@@ -83,11 +84,12 @@ def _make_run_subagent(store: ArtifactStore, model: str, verbose: bool,
         sub = Agent(
             name="subagent",
             system=SUBAGENT_SYSTEM,
-            tools=subagent_tools(store, grant_id),
+            tools=subagent_tools(store, grant_id, event_sink=event_sink),
             config=ModelConfig(model=model),
             client=client,
             verbose=verbose,
             force_terminator="submit_report",
+            event_sink=event_sink,
         )
         r = sub.run(task)
         submit = _extract_submit_report(sub.messages) or {}

@@ -32,6 +32,7 @@ EventSink = Callable[[dict[str, Any]], None]
 # Override via ModelConfig(model=...) or runner --model flag.
 DEFAULT_MODEL = "deepseek-v4-pro"
 DEEPSEEK_BASE_URL = "https://api.deepseek.com/anthropic"
+TEXT_PREVIEW_CHARS = 1500
 
 
 @dataclass
@@ -154,6 +155,15 @@ class Agent:
     def _safe_keys(keys: list[str]) -> list[str]:
         forbidden = {"raw", "raw_blob", "raw_text", "body", "api_key"}
         return sorted(k for k in keys if k.lower() not in forbidden)
+
+    @staticmethod
+    def _text_preview_payload(text: str) -> dict[str, Any]:
+        preview = text[:TEXT_PREVIEW_CHARS]
+        return {
+            "text_chars": len(text),
+            "text_preview": preview,
+            "text_truncated": len(text) > TEXT_PREVIEW_CHARS,
+        }
 
     @classmethod
     def _tool_call_payload(cls, tool_name: str, input_: dict[str, Any]) -> dict[str, Any]:
@@ -310,7 +320,7 @@ class Agent:
                         "agent_text",
                         "assistant_text",
                         f"{self.name} emitted text ({len(b.text)} chars)",
-                        {"text_chars": len(b.text)},
+                        self._text_preview_payload(b.text),
                     )
                 elif b.type == "tool_use":
                     self._emit(

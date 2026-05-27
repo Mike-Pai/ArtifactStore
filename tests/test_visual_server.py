@@ -126,6 +126,79 @@ def test_agent_event_sink_summarizes_tool_results_without_content():
     assert "content_chars" in dumped
 
 
+def test_agent_text_event_includes_safe_preview():
+    events: list[dict[str, Any]] = []
+    text = "Supervisor found a narrow timezone signal."
+
+    client = ScriptedClient([
+        lambda _messages, _tools: _Response([_text(text)], "end_turn"),
+    ])
+    agent = Agent(
+        name="supervisor",
+        system="",
+        tools=[],
+        config=ModelConfig(model="test-model"),
+        client=client,
+        event_sink=events.append,
+    )
+
+    result = agent.run("go")
+
+    assert result.stop_reason == "end_turn"
+    text_event = next(event for event in events if event["kind"] == "agent_text")
+    assert text_event["payload"]["text_chars"] == len(text)
+    assert text_event["payload"]["text_preview"] == text
+    assert text_event["payload"]["text_truncated"] is False
+
+
+def test_agent_text_preview_truncates_long_output():
+    events: list[dict[str, Any]] = []
+    text = "x" * 1600
+
+    client = ScriptedClient([
+        lambda _messages, _tools: _Response([_text(text)], "end_turn"),
+    ])
+    agent = Agent(
+        name="supervisor",
+        system="",
+        tools=[],
+        config=ModelConfig(model="test-model"),
+        client=client,
+        event_sink=events.append,
+    )
+
+    agent.run("go")
+
+    text_event = next(event for event in events if event["kind"] == "agent_text")
+    assert text_event["payload"]["text_chars"] == 1600
+    assert len(text_event["payload"]["text_preview"]) == 1500
+    assert text_event["payload"]["text_truncated"] is True
+
+
+def test_run_state_redacts_agent_text_preview_markers():
+    state = vs.RunState(
+        run_id="run_test",
+        kind="pytest",
+        target="auth_expiry",
+        model="test-model",
+    )
+    state.add_event({
+        "actor": "supervisor",
+        "kind": "agent_text",
+        "title": "assistant_text",
+        "summary": "text",
+        "payload": {
+            "text_chars": 24,
+            "text_preview": "DEEPSEEK_API_KEY=secret",
+            "text_truncated": False,
+        },
+    })
+
+    dumped = json.dumps(state.trace())
+    assert "DEEPSEEK_API_KEY=secret" not in dumped
+    assert "[redacted]" in dumped
+
+
 def test_run_state_sanitizes_forbidden_payload_fields():
     state = vs.RunState(
         run_id="run_test",

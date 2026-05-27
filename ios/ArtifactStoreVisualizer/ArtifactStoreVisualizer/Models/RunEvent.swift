@@ -90,6 +90,19 @@ extension RunEvent {
         ),
         RunEvent(
             seq: 5,
+            timestamp: "2026-05-25T16:38:17Z",
+            actor: "supervisor",
+            kind: "agent_text",
+            title: "assistant_text",
+            summary: "supervisor emitted text (94 chars)",
+            payload: [
+                "text_chars": .number(94),
+                "text_preview": .string("Good, I have a pytest failure artifact with a clear timezone signal. I will create a narrow grant next."),
+                "text_truncated": .bool(false),
+            ]
+        ),
+        RunEvent(
+            seq: 6,
             timestamp: "2026-05-25T16:38:18Z",
             actor: "supervisor",
             kind: "tool_call",
@@ -98,7 +111,7 @@ extension RunEvent {
             payload: ["tool_name": .string("delegate"), "task_chars": .number(480)]
         ),
         RunEvent(
-            seq: 6,
+            seq: 7,
             timestamp: "2026-05-25T16:38:19Z",
             actor: "supervisor",
             kind: "delegate_started",
@@ -107,7 +120,7 @@ extension RunEvent {
             payload: ["grant_id": .string("grant_1234")]
         ),
         RunEvent(
-            seq: 7,
+            seq: 8,
             timestamp: "2026-05-25T16:38:23Z",
             actor: "subagent",
             kind: "tool_call",
@@ -116,7 +129,7 @@ extension RunEvent {
             payload: ["artifact_id": .string("art_12345678")]
         ),
         RunEvent(
-            seq: 8,
+            seq: 9,
             timestamp: "2026-05-25T16:38:24Z",
             actor: "subagent",
             kind: "audit_recorded",
@@ -125,7 +138,7 @@ extension RunEvent {
             payload: ["allowed": .bool(true), "result_count": .number(4)]
         ),
         RunEvent(
-            seq: 9,
+            seq: 10,
             timestamp: "2026-05-25T16:38:25Z",
             actor: "subagent",
             kind: "tool_result",
@@ -134,7 +147,7 @@ extension RunEvent {
             payload: ["tool_name": .string("artifact_get_spans"), "result_count": .number(4)]
         ),
         RunEvent(
-            seq: 10,
+            seq: 11,
             timestamp: "2026-05-25T16:38:20Z",
             actor: "supervisor",
             kind: "citation_verified",
@@ -143,7 +156,7 @@ extension RunEvent {
             payload: ["resolved": .bool(true)]
         ),
         RunEvent(
-            seq: 11,
+            seq: 12,
             timestamp: "2026-05-25T16:38:26Z",
             actor: "supervisor",
             kind: "tool_result",
@@ -152,7 +165,7 @@ extension RunEvent {
             payload: ["tool_name": .string("verify_citation"), "resolved": .bool(true)]
         ),
         RunEvent(
-            seq: 12,
+            seq: 13,
             timestamp: "2026-05-25T16:38:30Z",
             actor: "system",
             kind: "run_finished",

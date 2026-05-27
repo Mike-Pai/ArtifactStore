@@ -9,6 +9,7 @@ struct FlowMessageDetailSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     summarySection
+                    llmOutputSection
                     storeSection
                     eventsSection
                 }
@@ -53,6 +54,34 @@ struct FlowMessageDetailSheet: View {
             }
         }
         .sheetCard()
+    }
+
+    @ViewBuilder
+    private var llmOutputSection: some View {
+        if let event = message.relatedEvents.first(where: { $0.kind == "agent_text" }),
+           case .string(let text)? = event.payload["text_preview"] {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text("LLM Output")
+                        .font(.headline)
+                    Spacer()
+                    if let chars = event.payload["text_chars"]?.displayValue {
+                        Text("\(chars) chars")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                    if event.payload["text_truncated"]?.displayValue == "true" {
+                        inspectorBadge("truncated", color: .orange)
+                    }
+                }
+
+                Text(text)
+                    .font(.body)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .sheetCard()
+        }
     }
 
     @ViewBuilder

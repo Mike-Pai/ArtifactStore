@@ -463,13 +463,32 @@ enum ExecutionFlowMapper {
     }
 
     private static func makeAgentText(_ event: RunEvent) -> FlowMessageDraft {
-        FlowMessageDraft(
+        let fallback = "The LLM reads the latest harness result and decides what to do next."
+        return FlowMessageDraft(
             speaker: event.actor == "subagent" ? .subagentLLM : .supervisorLLM,
             title: event.actor == "subagent" ? "Subagent LLM updates diagnosis" : "Supervisor LLM updates plan",
-            summary: "The LLM reads the latest harness result and decides what to do next. Raw model text is not exposed in the visualizer.",
+            summary: agentTextSummary(event) ?? fallback,
             events: [event],
             storeOperations: []
         )
+    }
+
+    private static func agentTextSummary(_ event: RunEvent) -> String? {
+        guard case .string(let text)? = event.payload["text_preview"] else {
+            return nil
+        }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return nil
+        }
+        let oneLine = trimmed
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\t", with: " ")
+        let maxChars = 260
+        if oneLine.count <= maxChars {
+            return oneLine
+        }
+        return String(oneLine.prefix(maxChars)) + "..."
     }
 
     private static func makeDelegateStarted(_ event: RunEvent) -> FlowMessageDraft {

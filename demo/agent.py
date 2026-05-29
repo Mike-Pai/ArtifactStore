@@ -24,12 +24,15 @@ from typing import Any, Callable
 
 from anthropic import Anthropic
 
+EventSink = Callable[[dict[str, Any]], None]
+
 # Default model: DeepSeek V4 Pro. ~7-17x cheaper than Anthropic Sonnet 4.5
 # at the time of writing (~$0.44/M input vs $3/M, ~$0.87/M output vs $15/M),
 # and supports the same tool_use blocks via the /anthropic endpoint.
 # Override via ModelConfig(model=...) or runner --model flag.
 DEFAULT_MODEL = "deepseek-v4-pro"
 DEEPSEEK_BASE_URL = "https://api.deepseek.com/anthropic"
+TEXT_PREVIEW_CHARS = 1500
 
 
 @dataclass
@@ -99,6 +102,7 @@ class Agent:
         client: Anthropic | None = None,
         verbose: bool = False,
         force_terminator: str | None = None,
+        event_sink: EventSink | None = None,
     ):
         self.name = name
         self.system = system
@@ -122,12 +126,97 @@ class Agent:
         self.client = client
         self.verbose = verbose
         self.force_terminator = force_terminator
+        self.event_sink = event_sink
         self._tool_dict = {t.name: t for t in tools}
         self.messages: list[dict[str, Any]] = []
         # Latched once we've observed the provider reject tool_choice
         # (Qwen3.6 thinking mode, DeepSeek-reasoner). Skips sending it on
         # later turns to avoid the wasted-retry round-trip.
         self._tool_choice_unsupported: bool = False
+
+    def _emit(self, kind: str, title: str, summary: str,
+              payload: dict[str, Any] | None = None) -> None:
+        if self.event_sink is None:
+            return
+        event = {
+            "actor": self.name,
+            "kind": kind,
+            "title": title,
+            "summary": summary,
+            "payload": payload or {},
+        }
+        try:
+            self.event_sink(event)
+        except Exception as e:  # noqa: BLE001 - telemetry must not break runs
+            if self.verbose:
+                print(f"[{self.name}] event_sink failed: {type(e).__name__}: {e}")
+
+    @staticmethod
+    def _safe_keys(keys: list[str]) -> list[str]:
+        forbidden = {"raw", "raw_blob", "raw_text", "body", "api_key"}
+        return sorted(k for k in keys if k.lower() not in forbidden)
+
+    @staticmethod
+    def _text_preview_payload(text: str) -> dict[str, Any]:
+        preview = text[:TEXT_PREVIEW_CHARS]
+        return {
+            "text_chars": len(text),
+            "text_preview": preview,
+            "text_truncated": len(text) > TEXT_PREVIEW_CHARS,
+        }
+
+    @classmethod
+    def _tool_call_payload(cls, tool_name: str, input_: dict[str, Any]) -> dict[str, Any]:
+        payload: dict[str, Any] = {"tool_name": tool_name}
+        if not isinstance(input_, dict):
+            payload["input_type"] = type(input_).__name__
+            return payload
+        passthrough = {
+            "artifact_id", "view", "grant_id", "citation", "kind", "target",
+            "limit", "token_budget", "max_tokens", "ttl_seconds",
+            "subject_agent_id", "confidence",
+        }
+        list_passthrough = {
+            "artifact_types", "allowed_views", "allowed_ops", "span_types",
+            "relations", "citations",
+        }
+        for key in passthrough:
+            if key in input_:
+                payload[key] = input_[key]
+        for key in list_passthrough:
+            value = input_.get(key)
+            if isinstance(value, list):
+                payload[key] = value
+        if "task" in input_:
+            payload["task_chars"] = len(str(input_["task"]))
+        if "diagnosis" in input_:
+            payload["diagnosis_chars"] = len(str(input_["diagnosis"]))
+        return payload
+
+    @staticmethod
+    def _tool_result_summary(block: dict[str, Any]) -> dict[str, Any]:
+        content = block.get("content", "")
+        payload: dict[str, Any] = {
+            "is_error": bool(block.get("is_error")),
+            "content_type": type(content).__name__,
+        }
+        if isinstance(content, str):
+            payload["content_chars"] = len(content)
+            if payload["is_error"] and ":" in content:
+                payload["error_type"] = content.split(":", 1)[0][:80]
+            try:
+                decoded = json.loads(content)
+            except (TypeError, json.JSONDecodeError):
+                return payload
+            if isinstance(decoded, list):
+                payload["result_count"] = len(decoded)
+                if decoded and isinstance(decoded[0], dict):
+                    payload["first_item_keys"] = Agent._safe_keys(
+                        list(decoded[0].keys())
+                    )
+            elif isinstance(decoded, dict):
+                payload["result_keys"] = Agent._safe_keys(list(decoded.keys()))
+        return payload
 
     def _exec_tool(self, call) -> dict[str, Any]:
         block: dict[str, Any] = {"type": "tool_result", "tool_use_id": call.id}
@@ -160,6 +249,14 @@ class Agent:
                 if self.verbose:
                     print(f"[{self.name}] hit max_turns={self.config.max_turns}; "
                           f"exiting without natural termination")
+                self._emit(
+                    "error",
+                    "max_turns",
+                    f"{self.name} hit max_turns={self.config.max_turns}",
+                    {"max_turns": self.config.max_turns,
+                     "turns": turns - 1,
+                     "tool_calls": tool_calls},
+                )
                 return AgentResult(
                     final_text=f"[agent={self.name} hit max_turns="
                                 f"{self.config.max_turns} without termination]",
@@ -217,6 +314,21 @@ class Agent:
             self.messages.append({"role": "assistant", "content": resp.content})
 
             tool_uses = [b for b in resp.content if b.type == "tool_use"]
+            for b in resp.content:
+                if b.type == "text":
+                    self._emit(
+                        "agent_text",
+                        "assistant_text",
+                        f"{self.name} emitted text ({len(b.text)} chars)",
+                        self._text_preview_payload(b.text),
+                    )
+                elif b.type == "tool_use":
+                    self._emit(
+                        "tool_call",
+                        b.name,
+                        f"{self.name} called {b.name}",
+                        self._tool_call_payload(b.name, b.input),
+                    )
             if self.verbose:
                 for b in resp.content:
                     if b.type == "text":
@@ -237,6 +349,16 @@ class Agent:
                     cache_creation_input_tokens=cache_create,
                 )
 
-            tool_results = [self._exec_tool(c) for c in tool_uses]
+            tool_results = []
+            for c in tool_uses:
+                result = self._exec_tool(c)
+                tool_results.append(result)
+                self._emit(
+                    "tool_result",
+                    c.name,
+                    f"{self.name} received result from {c.name}",
+                    {"tool_name": c.name,
+                     **self._tool_result_summary(result)},
+                )
             tool_calls += len(tool_results)
             self.messages.append({"role": "user", "content": tool_results})
